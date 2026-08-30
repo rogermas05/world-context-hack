@@ -39,6 +39,24 @@ def main():
     f0, f1 = int(a.start_s * src_fps), int(a.end_s * src_fps)
     cap.set(cv2.CAP_PROP_POS_FRAMES, f0)
 
+    # IMU: per-sample camera-frame angular velocity for rotation-compensated tracking
+    imu = json.loads(open(ROOT / c["imu_path"]).read())
+    Mg = np.array(rec["gyro"]["M"]); bg = np.deg2rad(np.array(rec["gyro"]["bias_dps"]))
+    imu_t = np.array(imu["t"]) + rec["gyro"].get("time_offset_ms", 0.0) / 1000.0
+    imu_w = (Mg @ (np.array(imu["gyro"], float) - bg).T).T
+
+    def cam_rot_between(t0, t1):
+        """R such that p_cam(t1) = R @ p_cam(t0) for a world-fixed point (pure rotation)."""
+        i0, i1 = np.searchsorted(imu_t, [t0, t1])
+        rv = np.zeros(3)
+        for i in range(max(i0, 1) - 1, min(i1, len(imu_t) - 1)):
+            rv = rv + imu_w[i] * (imu_t[i + 1] - imu_t[i])
+        th = np.linalg.norm(rv)
+        if th < 1e-9: return np.eye(3)
+        kx, ky, kz = rv / th
+        Km = np.array([[0, -kz, ky], [kz, 0, -kx], [-ky, kx, 0]])
+        return np.eye(3) - np.sin(th) * Km + (1 - np.cos(th)) * (Km @ Km)   # exp(-[rv])
+
     lm = vision.HandLandmarker.create_from_options(vision.HandLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=str(MODEL)),
         running_mode=vision.RunningMode.VIDEO, num_hands=4,
@@ -52,7 +70,7 @@ def main():
     pinch = np.full((N, 2), np.nan)
 
     t0 = time.time(); k = 0; fi = f0
-    last_seen = [None, None]; last_t = [0.0, 0.0]
+    last_seen = [None, None]; last_t = [0.0, 0.0]; last_rot_t = [0.0, 0.0]
     cand_log = []
     while fi <= f1:
         ok, fr = cap.read()
@@ -79,6 +97,10 @@ def main():
                 if all(np.mean(np.linalg.norm(c["p"] - o["p"], axis=1)) > 70 for o in keep):
                     keep.append(c)
             tnow = fi / src_fps
+            for side in (0, 1):   # rotate last-seen positions into the current camera frame
+                if last_seen[side] is not None:
+                    last_seen[side] = cam_rot_between(max(last_t[side], last_rot_t[side]), tnow) @ last_seen[side]
+                    last_rot_t[side] = tnow
             for c in keep:
                 v = c["p"][9] - c["p"][0]
                 cand_log.append([tnow, c["p"][0,0], c["p"][0,1], float(np.linalg.norm(c["tv"])),

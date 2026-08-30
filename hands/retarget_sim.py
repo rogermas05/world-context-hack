@@ -217,7 +217,7 @@ def main():
     # ---- render
     outdir = Path(a.outdir or ROOT / f"work/ego2so101/frames_{clip_id}"); outdir.mkdir(parents=True, exist_ok=True)
     for f in outdir.glob("*.jpg"): f.unlink()
-    np.savez(outdir / "trajectory.npz", times=times, qpos=Q, joint_names=[model.joint(i).name for i in range(model.njnt)],
+    np.savez(outdir / "trajectory.npz", clip_id=clip_id, times=times, qpos=Q, joint_names=[model.joint(i).name for i in range(model.njnt)],
              target_pos=np.stack([t[0] for t in targets]), target_rot=np.stack([t[1] for t in targets]), pos_err=err)
     H, W_ = (360, 640) if a.half else (720, 1280)
     renderer = mujoco.Renderer(model, H, W_)

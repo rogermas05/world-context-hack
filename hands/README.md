@@ -33,6 +33,38 @@ tagged "no track (coasting)" and the arm holds its pose.
    - Fast iteration: `--stride 75 --half` renders a 12-frame preview in ~5 s.
 3. `encode.py frames_dir out.mp4 15` — H.264 via PyAV (no ffmpeg binary needed).
 
+## Running it on the real rig (head + two hands)
+
+Three SO-101 arms on USB: the **follower** is the core/head (neck turn + nod from
+the clip's head IMU) and the **two leaders** are the left and right hands, driven
+as position-controlled followers.
+
+```bash
+python hands/recover_calibration.py     # once per machine -- see note below
+python hands/play_full_body.py --dry-run    # the plan, no hardware
+python hands/play_full_body.py --preflight  # connect + check headroom, no motion
+python hands/play_full_body.py              # the real thing, synced to the clip
+```
+
+Ports and arm ids live in `hands/arm_config.py`; update them there if the arms
+re-enumerate. `--no-head`, `--scale`, `--duration` and `--swap-hands` are there
+for tuning a demo.
+
+**Calibration usually needs no physical sweep.** SO-101 servos keep their homing
+offsets and range limits in EEPROM, so an arm calibrated on one laptop is still
+calibrated on the next -- only the host-side JSON is missing.
+`recover_calibration.py` reads it back off the motors and writes that JSON. It
+refuses any arm whose EEPROM looks unswept and points you at
+`calibrate_all_arms.py` for that one arm.
+
+**Safety.** Motion is played *relative* to the pose each arm is in at startup, so
+the rig does not depend on absolute calibration agreeing between machines. Before
+moving, `play_full_body.py` fits the planned excursion inside each joint's real
+calibrated travel: first by shifting the start pose toward mid-range (free), then
+by scaling that joint's amplitude if the swing still would not fit. It prints
+every adjustment and every joint's margin. On top of that, each joint is capped
+by `MAX_OFFSET_DEG` and each command by lerobot's `max_relative_target`.
+
 ## Setup
 
 ```bash
