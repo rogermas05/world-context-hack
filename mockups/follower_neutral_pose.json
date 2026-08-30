@@ -1,0 +1,13 @@
+{
+  "arm_id": "hackathon_follower",
+  "port": "/dev/tty.usbmodem5A7A0547481",
+  "note": "Standing pose, read live off the calibrated follower. Body metaphor: shoulder_pan=waist, shoulder_lift=lower spine, elbow_flex=upper spine, wrist_flex/wrist_roll=neck, gripper=head. wrist_roll corrected by -90deg so the head faces straight at rest.",
+  "neutral_pose": {
+    "shoulder_pan": -3.12,
+    "shoulder_lift": 23.65,
+    "elbow_flex": -101.32,
+    "wrist_flex": 13.32,
+    "wrist_roll": -89.78,
+    "gripper": 7.24
+  }
+}

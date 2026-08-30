@@ -1,0 +1,13 @@
+{
+  "arm_id": "hackathon_leader",
+  "port": "/dev/tty.usbmodem5A7A0561491",
+  "note": "Standing pose, captured by hand (leader arm is torque-off by default, freely posable). Same body metaphor as the follower: shoulder_pan=waist, shoulder_lift=lower spine, elbow_flex=upper spine, wrist_flex/wrist_roll=neck, gripper=head.",
+  "neutral_pose": {
+    "shoulder_pan": -1.89,
+    "shoulder_lift": -26.86,
+    "elbow_flex": -29.45,
+    "wrist_flex": 44.09,
+    "wrist_roll": 2.86,
+    "gripper": 2.54
+  }
+}
