@@ -34,23 +34,31 @@ JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_ro
 
 # --- safety ----------------------------------------------------------------
 # Hardware cap on how far a single command may jump from the present position.
-MAX_RELATIVE_TARGET_DEG = 25.0
+# This is a SOFTWARE ceiling we impose, not a real hardware limit -- 25deg at
+# 30Hz caps requested speed at ~750deg/s, which was regularly engaging (visible
+# as constant "clamped to be safe" warnings), meaning our own cap was the
+# bottleneck rather than the servo's real physical speed. Raised so the servo's
+# actual capability becomes the limiting factor instead.
+MAX_RELATIVE_TARGET_DEG = 45.0
 
 # Per-joint cap on the excursion from the captured neutral pose. The sim
 # trajectory can swing wrist_roll through ~320 deg, which is fine in MuJoCo but
 # ugly and stressful on a real arm, so every joint is clamped to a demo-safe
 # envelope. Widen deliberately, not by accident.
 MAX_OFFSET_DEG = {
-    "shoulder_pan": 35.0,
-    "shoulder_lift": 35.0,
-    "elbow_flex": 40.0,
-    "wrist_flex": 45.0,
-    "wrist_roll": 60.0,
+    "shoulder_pan": 50.0,
+    "shoulder_lift": 50.0,
+    "elbow_flex": 55.0,
+    "wrist_flex": 60.0,
+    "wrist_roll": 80.0,
     "gripper": 100.0,   # gripper is RANGE_0_100, handled separately
 }
 
 # Motion sent to the arms is this fraction of the (clamped) sim excursion.
-DEFAULT_MOTION_SCALE = 0.8
+# Some joints were already saturating the old, tighter MAX_OFFSET_DEG caps
+# (e.g. wrist_flex hitting exactly +45deg), so raising scale alone wouldn't
+# have made the motion any more expressive -- both were raised together.
+DEFAULT_MOTION_SCALE = 1.1
 
 CONTROL_HZ = 30.0
 POSE_TRANSITION_HZ = 25.0

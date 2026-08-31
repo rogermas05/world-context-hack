@@ -1,0 +1,14 @@
+{
+  "arm_id": "hackathon_l1_right",
+  "port": "/dev/tty.usbmodem5A7A0556051",
+  "role": "right hand",
+  "note": "Rest pose, captured by hand (leader arm is torque-off by default, freely posable).",
+  "neutral_pose": {
+    "shoulder_pan": -21.98,
+    "shoulder_lift": -11.43,
+    "elbow_flex": 19.16,
+    "wrist_flex": 16.35,
+    "wrist_roll": 14.46,
+    "gripper": 47.68
+  }
+}

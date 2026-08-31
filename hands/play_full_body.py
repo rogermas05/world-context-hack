@@ -45,9 +45,23 @@ from arm_config import (  # noqa: E402
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_TRAJ = REPO / "hands/trajectories/z45uhnxrkwr5s_60_120.npz"
 
+# The real, hand-calibrated standing pose for each arm (from hardware/'s
+# earlier calibration session), NOT whatever pose the arm happens to be in
+# when this script connects -- that can be an arbitrary gravity-sagged pose
+# if the arm has sat idle with torque off.
+NEUTRAL_POSE_FILE = {
+    "head": REPO / "mockups/follower_neutral_pose.json",
+    "left": REPO / "mockups/leader_neutral_pose.json",
+    "right": REPO / "mockups/l1_right_neutral_pose.json",
+}
+
+
+def load_saved_neutral(role: str) -> dict[str, float]:
+    return json.loads(NEUTRAL_POSE_FILE[role].read_text())["neutral_pose"]
+
 # Head motion shaping (mirrors hardware/generate_trajectory.py)
-TURN_LIMIT_DEG = 30.0
-NOD_LIMIT_DEG = 25.0
+TURN_LIMIT_DEG = 35.0
+NOD_LIMIT_DEG = 30.0
 CLIP_FACTOR = 1.6
 DEHIFT_S = 4.0
 
@@ -136,7 +150,7 @@ def load_head_trajectory(root: Path, clip_id: str, t_start: float, times: np.nda
     nod = np.interp(times, tw - t_start, shaped(cw[:, axis_nod], NOD_LIMIT_DEG))
     # CLIP_FACTOR lets the shaped signal exceed its nominal limit; clamp the neck
     # to the same per-joint envelope every other joint obeys.
-    turn = np.clip(turn, -MAX_OFFSET_DEG["wrist_roll"], MAX_OFFSET_DEG["wrist_roll"])
+    turn = np.clip(turn, -MAX_OFFSET_DEG["shoulder_pan"], MAX_OFFSET_DEG["shoulder_pan"])
     nod = np.clip(nod, -MAX_OFFSET_DEG["wrist_flex"], MAX_OFFSET_DEG["wrist_flex"])
     return turn, nod, clip["relative_path"]
 
@@ -222,20 +236,71 @@ def move_to_pose_smoothly(robot, target: dict[str, float], label: str) -> None:
     print(f"WARNING: {label} did not settle within tolerance before the time limit.")
 
 
-def play_video_synced(video_path: Path) -> None:
+REST_FALL_S = 4.0  # seconds to ease down to rest at the end -- NEVER slam the arms down
+
+
+def move_to_rest_slowly(robot, target: dict[str, float], label: str,
+                         duration_s: float = REST_FALL_S) -> None:
+    """Eases every joint from its current position down to `target` (neutral/
+    rest) over duration_s seconds on a smooth cosine curve, sent in small
+    steps computed here -- NOT a fast snap via send-full-target-and-let-the-
+    servo-close-the-gap. This is deliberately independent of how responsive
+    MAX_RELATIVE_TARGET_DEG is set for live playback: raising that cap for
+    accurate tracking during motion must never make the end-of-run "return to
+    rest" move fast too. Always use this (not move_to_pose_smoothly) for
+    settling the arms at the end of a run, interrupted or not."""
+    current = {k: v for k, v in robot.get_observation().items() if k.endswith(".pos")}
+    n_steps = max(1, int(round(duration_s * POSE_TRANSITION_HZ)))
+    for i in range(1, n_steps + 1):
+        frac = (1 - np.cos(np.pi * i / n_steps)) / 2  # 0 -> 1, ease-in-out
+        action = {f"{j}.pos": current[f"{j}.pos"] + (v - current[f"{j}.pos"]) * frac
+                  for j, v in target.items()}
+        robot.send_action(action)
+        time.sleep(1.0 / POSE_TRANSITION_HZ)
+    print(f"  {label}: eased down to rest over {duration_s:.1f}s")
+
+
+def play_video_synced(video_path: Path, start_s: float = 0.0, speed: float = 1.0) -> None:
+    """Opens video_path, seeks to start_s (the trajectory data's own clip-relative
+    start time -- the arms are performing THAT window, not the beginning of the
+    clip), sets its playback rate to match the arm's --speed, then confirms
+    playback is actually advancing before returning."""
     subprocess.Popen(["open", "-a", "QuickTime Player", str(video_path)])
     time.sleep(1.5)
-    result = subprocess.run(["osascript", "-e", '''
+    result = subprocess.run(["osascript", "-e", f'''
         tell application "QuickTime Player"
-            play document 1
+            set current time of document 1 to {start_s}
+            set rate of document 1 to {speed}
             repeat 200 times
-                if (current time of document 1) > 0 then return "started"
+                if (current time of document 1) > {start_s} then return "started"
                 delay 0.01
             end repeat
             return "timeout"
         end tell'''], capture_output=True, text=True)
     if result.stdout.strip() != "started":
         print(f"WARNING: could not confirm playback started ({result.stdout.strip()!r}) -- continuing")
+
+
+def add_soft_fall(t_ctrl: np.ndarray, hands: dict, turn, nod, tail_s: float):
+    """Extends the trajectory with a cosine ease-out tail: every offset-based
+    joint (not gripper, which is an absolute 0-100 position, not an offset)
+    glides smoothly from its final value down to 0 (neutral) over tail_s
+    seconds, instead of the motion just stopping and the arm snapping back."""
+    if tail_s <= 0:
+        return t_ctrl, hands, turn, nod
+    n_tail = max(1, int(round(tail_s * CONTROL_HZ)))
+    ramp = (np.cos(np.linspace(0, np.pi, n_tail)) + 1) / 2  # 1 -> 0, smooth
+
+    def fall(arr):
+        return np.concatenate([arr, arr[-1] * ramp])
+
+    t_tail = t_ctrl[-1] + (np.arange(1, n_tail + 1) / CONTROL_HZ)
+    t_ctrl = np.concatenate([t_ctrl, t_tail])
+    hands = {s: {j: (fall(v) if j != "gripper" else np.concatenate([v, np.full(n_tail, v[-1])]))
+                 for j, v in o.items()} for s, o in hands.items()}
+    if turn is not None:
+        turn, nod = fall(turn), fall(nod)
+    return t_ctrl, hands, turn, nod
 
 
 # --------------------------------------------------------------------------- main
@@ -246,11 +311,24 @@ def main() -> None:
     ap.add_argument("--clip-start", type=float, default=60.0,
                     help="clip-relative start time the trajectory was extracted from")
     ap.add_argument("--scale", type=float, default=DEFAULT_MOTION_SCALE)
+    ap.add_argument("--speed", type=float, default=1.0,
+                    help="playback rate for BOTH arm motion and video (e.g. 0.5 = half speed). "
+                         "The safety clamp regularly engages at 1.0x, meaning the intended motion "
+                         "exceeds what the servos can actually track in real time -- slowing down "
+                         "gives them enough real time to reach each waypoint instead of lagging.")
     ap.add_argument("--duration", type=float, default=None, help="seconds to play (default: all)")
     ap.add_argument("--dry-run", action="store_true", help="no hardware, no video: just the plan")
     ap.add_argument("--no-head", action="store_true")
     ap.add_argument("--no-video", action="store_true")
+    ap.add_argument("--overlay-video", type=Path, default=None,
+                    help="play this rendered CV-overlay video (ego + hand skeleton + MuJoCo sim, "
+                         "from retarget_sim.py + encode.py) instead of the raw dataset clip. It's "
+                         "already trimmed to the extraction window, so it plays from its own t=0, "
+                         "not --clip-start.")
     ap.add_argument("--swap-hands", action="store_true", help="if left/right come out mirrored")
+    ap.add_argument("--soft-fall", type=float, default=2.5,
+                    help="seconds to ease every joint's offset smoothly down to 0 (neutral) at "
+                         "the end, instead of the motion just stopping and snapping back. 0 disables.")
     ap.add_argument("--preflight", action="store_true",
                     help="connect and check headroom, then exit without moving")
     args = ap.parse_args()
@@ -281,6 +359,8 @@ def main() -> None:
     if args.no_head:
         turn = nod = None
 
+    t_ctrl, hands, turn, nod = add_soft_fall(t_ctrl, hands, turn, nod, args.soft_fall)
+
     print(f"clip={clip_id}  {len(t_ctrl)} steps @ {CONTROL_HZ:g} Hz  "
           f"({t_ctrl[-1]:.1f}s)  motion scale={args.scale}")
     for side in ("left", "right"):
@@ -305,20 +385,24 @@ def main() -> None:
             robot = SO101Follower(cfg)
             robot.connect(calibrate=False)   # requires calibrate_all_arms.py to have run
             robots[role] = robot
-            obs = robot.get_observation()
-            neutral[role] = {j: float(obs[f"{j}.pos"]) for j in JOINTS}
-            print(f"connected {role:5s} neutral={ {j: round(v,1) for j,v in neutral[role].items()} }")
+            neutral[role] = load_saved_neutral(role)
+            print(f"connected {role:5s} neutral (calibrated standing pose)="
+                  f"{ {j: round(v,1) for j,v in neutral[role].items()} }")
 
         print("\nfitting motion to each arm's calibrated travel:")
         all_notes = []
         for role in roles:
-            plan = hands[role] if role in hands else {"wrist_roll": turn, "wrist_flex": nod}
+            # turn drives the WAIST (shoulder_pan), not the neck (wrist_roll) --
+            # a neck-only turn barely swings sideways since it's such a short
+            # lever arm; the whole body rotating from the base reads much more
+            # clearly as "turning to look" (found live on the rig).
+            plan = hands[role] if role in hands else {"shoulder_pan": turn, "wrist_flex": nod}
             working, fitted, notes = fit_motion(role, robots[role], neutral[role], plan)
             neutral[role] = working
             if role in hands:
                 hands[role] = fitted
             else:
-                turn, nod = fitted["wrist_roll"], fitted["wrist_flex"]
+                turn, nod = fitted["shoulder_pan"], fitted["wrist_flex"]
             all_notes += notes
             print(f"  {role}:")
             report_plan(role, robots[role], working, fitted)
@@ -338,13 +422,18 @@ def main() -> None:
             print(f"starting in {i}...")
             time.sleep(1)
 
-        if video_path and not args.no_video:
-            play_video_synced(video_path)
-        print(">>> GO <<<")
+        if args.overlay_video:
+            play_video_synced(args.overlay_video, 0.0, args.speed)
+        elif video_path and not args.no_video:
+            play_video_synced(video_path, args.clip_start, args.speed)
+        print(">>> GO <<<" + (f"  (speed={args.speed}x)" if args.speed != 1.0 else ""))
 
         start = time.monotonic()
         for k, tk in enumerate(t_ctrl):
-            sleep_for = tk - (time.monotonic() - start)
+            # stretched wall-clock schedule: at speed<1, each waypoint gets more
+            # real time to actually arrive, instead of the servo perpetually
+            # lagging behind a target it physically can't track that fast.
+            sleep_for = (tk / args.speed) - (time.monotonic() - start)
             if sleep_for > 0:
                 time.sleep(sleep_for)
             for side in ("left", "right"):
@@ -356,17 +445,31 @@ def main() -> None:
             if turn is not None:
                 h = neutral["head"]
                 robots["head"].send_action({
-                    "wrist_roll.pos": h["wrist_roll"] + float(turn[k]),
+                    # Static joints re-sent every tick too, not just the two
+                    # driven neck joints -- otherwise nothing fights gravity
+                    # creep on shoulder_lift/elbow_flex for the full 60s and
+                    # the head sags out of position (found live on the rig).
+                    "shoulder_lift.pos": h["shoulder_lift"],
+                    "elbow_flex.pos": h["elbow_flex"],
+                    "gripper.pos": h["gripper"],
+                    "wrist_roll.pos": h["wrist_roll"],
+                    "shoulder_pan.pos": h["shoulder_pan"] + float(turn[k]),
                     "wrist_flex.pos": h["wrist_flex"] + float(nod[k]),
                 })
-        print("playback complete; returning to neutral...")
+        print("playback complete; easing down to rest...")
         for role in roles:
-            move_to_pose_smoothly(robots[role], neutral[role], role)
+            move_to_rest_slowly(robots[role], neutral[role], role)
     except KeyboardInterrupt:
-        print("\ninterrupted -- returning to neutral")
+        print("\ninterrupted -- easing down to rest")
         for role, robot in robots.items():
             try:
-                move_to_pose_smoothly(robot, neutral[role], role)
+                move_to_rest_slowly(robot, neutral[role], role)
+            except KeyboardInterrupt:
+                # a second interrupt while already easing down -- KeyboardInterrupt
+                # is a BaseException, not an Exception, so it needs its own clause
+                # or it crashes out here uncaught instead of finishing gracefully.
+                print(f"  ({role}: second interrupt -- skipping ahead to disconnect)")
+                break
             except Exception as exc:  # noqa: BLE001
                 print(f"  ({role}: {exc})")
     finally:
