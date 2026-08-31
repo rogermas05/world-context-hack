@@ -4,6 +4,8 @@ Hackathon project on the World Context dataset: derives head-orientation
 motion from calibrated egocentric IMU data and reenacts it on an SO-101 arm
 (leader or follower), synced to the source clip for comparison.
 
+Link: https://www.youtube.com/watch?v=CgDCDHBID_g&feature=youtu.be
+
 ## Layout
 
 - `hardware/` — the pipeline
